@@ -4,45 +4,43 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
-	"strings"
 
-	dbm "github.com/cometbft/cometbft-db"
-	tmcfg "github.com/cometbft/cometbft/config"
-	tmcli "github.com/cometbft/cometbft/libs/cli"
-	"github.com/cometbft/cometbft/libs/log"
-	tmtypes "github.com/cometbft/cometbft/types"
-	"github.com/cosmos/cosmos-sdk/baseapp"
+	"github.com/XRGB/xrgb-chain/app"
+	appparams "github.com/XRGB/xrgb-chain/app/params"
+	"github.com/cosmos/cosmos-sdk/x/genutil"
+	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
+
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/config"
-	"github.com/cosmos/cosmos-sdk/client/debug"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/client/keys"
+	"github.com/cosmos/cosmos-sdk/client/pruning"
 	"github.com/cosmos/cosmos-sdk/client/rpc"
 	"github.com/cosmos/cosmos-sdk/server"
-	serverconfig "github.com/cosmos/cosmos-sdk/server/config"
+	sdkserver "github.com/cosmos/cosmos-sdk/server"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
-	"github.com/cosmos/cosmos-sdk/snapshots"
-	snapshottypes "github.com/cosmos/cosmos-sdk/snapshots/types"
-	"github.com/cosmos/cosmos-sdk/store"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authcmd "github.com/cosmos/cosmos-sdk/x/auth/client/cli"
 	"github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/cosmos/cosmos-sdk/x/crisis"
-	"github.com/cosmos/cosmos-sdk/x/genutil"
 	genutilcli "github.com/cosmos/cosmos-sdk/x/genutil/client/cli"
-	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
+
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	// this line is used by starport scaffolding # root/moduleImport
 
-	"github.com/XRGB/xrgb-chain/app"
-	appparams "github.com/XRGB/xrgb-chain/app/params"
+	dbm "github.com/cometbft/cometbft-db"
+	tmcfg "github.com/cometbft/cometbft/config"
+	tmcli "github.com/cometbft/cometbft/libs/cli"
+	"github.com/cometbft/cometbft/libs/log"
+
+	ethermintclient "github.com/evmos/ethermint/client"
+	"github.com/evmos/ethermint/client/debug"
+	"github.com/evmos/ethermint/crypto/hd"
+	ethermintserver "github.com/evmos/ethermint/server"
+	servercfg "github.com/evmos/ethermint/server/config"
 )
 
-// NewRootCmd creates a new root command for a Cosmos SDK application
+// NewRootCmd creates a new root command for dymension hub
 func NewRootCmd() (*cobra.Command, appparams.EncodingConfig) {
 	encodingConfig := app.MakeEncodingConfig()
 	initClientCtx := client.Context{}.
@@ -52,6 +50,7 @@ func NewRootCmd() (*cobra.Command, appparams.EncodingConfig) {
 		WithLegacyAmino(encodingConfig.Amino).
 		WithInput(os.Stdin).
 		WithAccountRetriever(types.AccountRetriever{}).
+		WithKeyringOptions(hd.EthSecp256k1Option()).
 		WithHomeDir(app.DefaultNodeHome).
 		WithViper("")
 
@@ -77,17 +76,12 @@ func NewRootCmd() (*cobra.Command, appparams.EncodingConfig) {
 
 			customAppTemplate, customAppConfig := initAppConfig()
 			customTMConfig := initTendermintConfig()
-			return server.InterceptConfigsPreRunHandler(
-				cmd, customAppTemplate, customAppConfig, customTMConfig,
-			)
+
+			return server.InterceptConfigsPreRunHandler(cmd, customAppTemplate, customAppConfig, customTMConfig)
 		},
 	}
 
 	initRootCmd(rootCmd, encodingConfig)
-	overwriteFlagDefaults(rootCmd, map[string]string{
-		flags.FlagChainID:        strings.ReplaceAll(app.Name, "-", ""),
-		flags.FlagKeyringBackend: "test",
-	})
 
 	return rootCmd, encodingConfig
 }
@@ -96,20 +90,39 @@ func NewRootCmd() (*cobra.Command, appparams.EncodingConfig) {
 // return tmcfg.DefaultConfig if no custom configuration is required for the application.
 func initTendermintConfig() *tmcfg.Config {
 	cfg := tmcfg.DefaultConfig()
+
+	// these values put a higher strain on node memory
+	// cfg.P2P.MaxNumInboundPeers = 100
+	// cfg.P2P.MaxNumOutboundPeers = 40
+
 	return cfg
 }
 
-func initRootCmd(
-	rootCmd *cobra.Command,
-	encodingConfig appparams.EncodingConfig,
-) {
-	// Set config
+// initAppConfig helps to override default appConfig template and configs.
+// return "", nil if no custom configuration is required for the application.
+func initAppConfig() (string, interface{}) {
+	baseDenom, err := sdk.GetBaseDenom()
+	if err != nil {
+		panic(err)
+	}
+
+	customAppTemplate, customAppConfig := servercfg.AppConfig(baseDenom)
+	return customAppTemplate, customAppConfig
+}
+
+func initRootCmd(rootCmd *cobra.Command, encodingConfig appparams.EncodingConfig) {
 	initSDKConfig()
 
-	gentxModule := app.ModuleBasics[genutiltypes.ModuleName].(genutil.AppModuleBasic)
+	a := appCreator{encodingConfig}
 	rootCmd.AddCommand(
-		genutilcli.InitCmd(app.ModuleBasics, app.DefaultNodeHome),
-		genutilcli.CollectGenTxsCmd(banktypes.GenesisBalancesIterator{}, app.DefaultNodeHome, gentxModule.GenTxValidator),
+		ethermintclient.ValidateChainID(
+			genutilcli.InitCmd(app.ModuleBasics, app.DefaultNodeHome),
+		),
+		genutilcli.CollectGenTxsCmd(
+			banktypes.GenesisBalancesIterator{},
+			app.DefaultNodeHome,
+			app.ModuleBasics[genutiltypes.ModuleName].(genutil.AppModuleBasic).GenTxValidator,
+		),
 		genutilcli.MigrateGenesisCmd(),
 		genutilcli.GenTxCmd(
 			app.ModuleBasics,
@@ -120,20 +133,16 @@ func initRootCmd(
 		genutilcli.ValidateGenesisCmd(app.ModuleBasics),
 		AddGenesisAccountCmd(app.DefaultNodeHome),
 		tmcli.NewCompletionCmd(rootCmd, true),
+		//NewTestnetCmd(app.ModuleBasics, banktypes.GenesisBalancesIterator{}),
 		debug.Cmd(),
 		config.Cmd(),
-		// this line is used by starport scaffolding # root/commands
+		pruning.PruningCmd(a.newApp),
 	)
 
-	a := appCreator{
-		encodingConfig,
-	}
-
 	// add server commands
-	server.AddCommands(
+	ethermintserver.AddCommands(
 		rootCmd,
-		app.DefaultNodeHome,
-		a.newApp,
+		ethermintserver.NewDefaultStartOptions(a.newApp, app.DefaultNodeHome),
 		a.appExport,
 		addModuleInitFlags,
 	)
@@ -143,8 +152,9 @@ func initRootCmd(
 		rpc.StatusCommand(),
 		queryCommand(),
 		txCommand(),
-		keys.Commands(app.DefaultNodeHome),
+		ethermintclient.KeyCommands(app.DefaultNodeHome),
 	)
+
 }
 
 // queryCommand returns the sub-command to send queries to the app
@@ -186,11 +196,13 @@ func txCommand() *cobra.Command {
 		authcmd.GetSignCommand(),
 		authcmd.GetSignBatchCommand(),
 		authcmd.GetMultiSignCommand(),
+		authcmd.GetMultiSignBatchCmd(),
 		authcmd.GetValidateSignaturesCommand(),
 		flags.LineBreak,
 		authcmd.GetBroadcastCommand(),
 		authcmd.GetEncodeCommand(),
 		authcmd.GetDecodeCommand(),
+		authcmd.GetAuxToFeeCommand(),
 	)
 
 	app.ModuleBasics.AddTxCommands(cmd)
@@ -204,22 +216,6 @@ func addModuleInitFlags(startCmd *cobra.Command) {
 	// this line is used by starport scaffolding # root/arguments
 }
 
-func overwriteFlagDefaults(c *cobra.Command, defaults map[string]string) {
-	set := func(s *pflag.FlagSet, key, val string) {
-		if f := s.Lookup(key); f != nil {
-			f.DefValue = val
-			f.Value.Set(val)
-		}
-	}
-	for key, val := range defaults {
-		set(c.Flags(), key, val)
-		set(c.PersistentFlags(), key, val)
-	}
-	for _, c := range c.Commands() {
-		overwriteFlagDefaults(c, defaults)
-	}
-}
-
 type appCreator struct {
 	encodingConfig appparams.EncodingConfig
 }
@@ -231,48 +227,12 @@ func (a appCreator) newApp(
 	traceStore io.Writer,
 	appOpts servertypes.AppOptions,
 ) servertypes.Application {
-	var cache sdk.MultiStorePersistentCache
-
-	if cast.ToBool(appOpts.Get(server.FlagInterBlockCache)) {
-		cache = store.NewCommitKVStoreCacheManager()
-	}
+	baseappOptions := server.DefaultBaseappOptions(appOpts)
 
 	skipUpgradeHeights := make(map[int64]bool)
-	for _, h := range cast.ToIntSlice(appOpts.Get(server.FlagUnsafeSkipUpgrades)) {
+	for _, h := range cast.ToIntSlice(appOpts.Get(sdkserver.FlagUnsafeSkipUpgrades)) {
 		skipUpgradeHeights[int64(h)] = true
 	}
-
-	pruningOpts, err := server.GetPruningOptionsFromFlags(appOpts)
-	if err != nil {
-		panic(err)
-	}
-
-	homeDir := cast.ToString(appOpts.Get(flags.FlagHome))
-	chainID := cast.ToString(appOpts.Get(flags.FlagChainID))
-	if chainID == "" {
-		// fallback to genesis chain-id
-		appGenesis, err := tmtypes.GenesisDocFromFile(filepath.Join(homeDir, "config", "genesis.json"))
-		if err != nil {
-			panic(err)
-		}
-
-		chainID = appGenesis.ChainID
-	}
-
-	snapshotDir := filepath.Join(cast.ToString(appOpts.Get(flags.FlagHome)), "data", "snapshots")
-	snapshotDB, err := dbm.NewDB("metadata", dbm.GoLevelDBBackend, snapshotDir)
-	if err != nil {
-		panic(err)
-	}
-	snapshotStore, err := snapshots.NewStore(snapshotDB, snapshotDir)
-	if err != nil {
-		panic(err)
-	}
-
-	snapshotOptions := snapshottypes.NewSnapshotOptions(
-		cast.ToUint64(appOpts.Get(server.FlagStateSyncSnapshotInterval)),
-		cast.ToUint32(appOpts.Get(server.FlagStateSyncSnapshotKeepRecent)),
-	)
 
 	return app.New(
 		logger,
@@ -281,21 +241,10 @@ func (a appCreator) newApp(
 		true,
 		skipUpgradeHeights,
 		cast.ToString(appOpts.Get(flags.FlagHome)),
-		cast.ToUint(appOpts.Get(server.FlagInvCheckPeriod)),
+		cast.ToUint(appOpts.Get(sdkserver.FlagInvCheckPeriod)),
 		a.encodingConfig,
 		appOpts,
-		baseapp.SetPruning(pruningOpts),
-		baseapp.SetMinGasPrices(cast.ToString(appOpts.Get(server.FlagMinGasPrices))),
-		baseapp.SetHaltHeight(cast.ToUint64(appOpts.Get(server.FlagHaltHeight))),
-		baseapp.SetHaltTime(cast.ToUint64(appOpts.Get(server.FlagHaltTime))),
-		baseapp.SetMinRetainBlocks(cast.ToUint64(appOpts.Get(server.FlagMinRetainBlocks))),
-		baseapp.SetInterBlockCache(cache),
-		baseapp.SetTrace(cast.ToBool(appOpts.Get(server.FlagTrace))),
-		baseapp.SetIndexEvents(cast.ToStringSlice(appOpts.Get(server.FlagIndexEvents))),
-		baseapp.SetSnapshot(snapshotStore, snapshotOptions),
-		baseapp.SetIAVLCacheSize(cast.ToInt(appOpts.Get(server.FlagIAVLCacheSize))),
-		baseapp.SetIAVLDisableFastNode(cast.ToBool(appOpts.Get(server.FlagDisableIAVLFastNode))),
-		baseapp.SetChainID(chainID),
+		baseappOptions...,
 	)
 }
 
@@ -334,38 +283,4 @@ func (a appCreator) appExport(
 	}
 
 	return app.ExportAppStateAndValidators(forZeroHeight, jailAllowedAddrs, modulesToExport)
-}
-
-// initAppConfig helps to override default appConfig template and configs.
-// return "", nil if no custom configuration is required for the application.
-func initAppConfig() (string, interface{}) {
-	// The following code snippet is just for reference.
-
-	type CustomAppConfig struct {
-		serverconfig.Config
-	}
-
-	// Optionally allow the chain developer to overwrite the SDK's default
-	// server config.
-	srvCfg := serverconfig.DefaultConfig()
-	// The SDK's default minimum gas price is set to "" (empty value) inside
-	// app.toml. If left empty by validators, the node will halt on startup.
-	// However, the chain developer can set a default app.toml value for their
-	// validators here.
-	//
-	// In summary:
-	// - if you leave srvCfg.MinGasPrices = "", all validators MUST tweak their
-	//   own app.toml config,
-	// - if you set srvCfg.MinGasPrices non-empty, validators CAN tweak their
-	//   own app.toml to override, or use this default value.
-	//
-	// In simapp, we set the min gas prices to 0.
-	srvCfg.MinGasPrices = "0stake"
-
-	customAppConfig := CustomAppConfig{
-		Config: *srvCfg,
-	}
-	customAppTemplate := serverconfig.DefaultConfigTemplate
-
-	return customAppTemplate, customAppConfig
 }
