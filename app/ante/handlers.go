@@ -2,7 +2,7 @@ package ante
 
 import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	ante "github.com/cosmos/cosmos-sdk/x/auth/ante"
+	"github.com/cosmos/cosmos-sdk/x/auth/ante"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	ibcante "github.com/cosmos/ibc-go/v7/modules/core/ante"
 	ethante "github.com/evmos/ethermint/app/ante"

@@ -1,15 +1,15 @@
 package ante
 
 import (
-	ante "github.com/cosmos/cosmos-sdk/x/auth/ante"
+	errorsmod "cosmossdk.io/errors"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	"github.com/cosmos/cosmos-sdk/x/auth/ante"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	authsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
 	ibckeeper "github.com/cosmos/ibc-go/v7/modules/core/keeper"
-	ethante "github.com/evmos/ethermint/app/ante"
 
-	errorsmod "cosmossdk.io/errors"
-	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	ethante "github.com/evmos/ethermint/app/ante"
 )
 
 type HandlerOptions struct {
